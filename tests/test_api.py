@@ -183,3 +183,41 @@ def test_configuration_requires_explicit_stable_principal_id(db, clock):
 
     with pytest.raises(ValueError):
         create_app(db=db, clock=clock, principals={"key": {"name": "Оператор", "role": "operator"}})
+
+
+def test_alternatives_api_is_read_only_for_viewer_and_requires_auth(db, clock, product):
+    payload = {
+        "start_at": "2030-01-02T10:00:00Z",
+        "end_at": "2030-01-02T11:00:00Z",
+        "search_until": "2030-01-03T10:00:00Z",
+        "items": [{"product_id": product["id"], "quantity": 1}],
+        "limit": 3,
+    }
+    with client(db, clock) as api:
+        assert api.post("/api/alternatives", json=payload).status_code == 401
+        response = api.post("/api/alternatives", headers=headers("viewer"), json=payload)
+        assert response.status_code == 200
+        assert response.json()["alternatives"][0]["start_at"] == payload["start_at"]
+        assert response.json()["duration_microseconds"] == 3_600_000_000
+        assert api.get("/api/bookings", headers=headers("viewer")).json() == []
+        assert len(api.get("/api/audit", headers=headers("viewer")).json()) == 1
+        payload["exclude_booking"] = "not-supported"
+        assert (
+            api.post("/api/alternatives", headers=headers("viewer"), json=payload).status_code
+            == 422
+        )
+
+
+def test_alternatives_api_does_not_coerce_boolean_limit(db, clock, product):
+    payload = {
+        "start_at": "2030-01-02T10:00:00Z",
+        "end_at": "2030-01-02T11:00:00Z",
+        "search_until": "2030-01-03T10:00:00Z",
+        "items": [{"product_id": product["id"], "quantity": 1}],
+        "limit": True,
+    }
+    with client(db, clock) as api:
+        assert (
+            api.post("/api/alternatives", headers=headers("viewer"), json=payload).status_code
+            == 422
+        )

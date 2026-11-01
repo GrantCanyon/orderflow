@@ -36,6 +36,14 @@ class BookingCreate(Payload):
     ttl_minutes: Annotated[StrictInt, Field(ge=1, le=60)] = 15
 
 
+class AlternativesRequest(Payload):
+    start_at: str
+    end_at: str
+    search_until: str
+    items: Annotated[list[BookingItem], Field(min_length=1, max_length=50)]
+    limit: Annotated[StrictInt, Field(ge=1, le=5)] = 3
+
+
 class Reschedule(Payload):
     start_at: str
     end_at: str
@@ -195,6 +203,10 @@ def create_app(db=None, clock=None, principals=None, demo=False):
     @app.get("/api/availability")
     def availability(start: str, end: str, principal=Depends(identity)):
         return service.availability(start, end)
+
+    @app.post("/api/alternatives")
+    def alternatives(body: AlternativesRequest, principal=Depends(identity)):
+        return service.alternatives(body.model_dump())
 
     @app.get("/api/bookings")
     def booking_list(

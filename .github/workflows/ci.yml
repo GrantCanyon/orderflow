@@ -2,6 +2,8 @@ name: Проверка OrderFlow
 on:
   push:
   pull_request:
+permissions:
+  contents: read
 jobs:
   test:
     name: Тесты / ${{ matrix.database }}
@@ -35,7 +37,9 @@ jobs:
           python -m ruff check .
           python -m ruff format --check .
       - name: Проверить JavaScript
-        run: node --check src/orderflow/static/app.js
+        run: |
+          node --check src/orderflow/static/app.js
+          node --test tests/time.test.mjs
       - name: Тесты SQLite
         if: matrix.database == 'sqlite'
         run: python -m pytest -q
@@ -44,3 +48,23 @@ jobs:
         env:
           ORDERFLOW_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/orderflow_test
         run: python -m pytest -q
+  compose-smoke:
+    name: Запуск Docker Compose
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_PASSWORD: ciOnlySyntheticPassword8472
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Собрать и запустить учебное окружение
+        run: docker compose up -d --build
+      - name: Проверить живое приложение и права
+        run: python scripts/smoke_http.py
+      - name: Показать диагностику при ошибке
+        if: failure()
+        run: docker compose logs --no-color
+      - name: Остановить временное окружение runner
+        if: always()
+        run: docker compose down --volumes --remove-orphans

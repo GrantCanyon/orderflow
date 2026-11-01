@@ -1,6 +1,5 @@
 import hashlib
 import json
-import math
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -20,7 +19,12 @@ def utc(value):
             raise DomainError("invalid_input", "Некорректная дата", status=422) from exc
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise DomainError("invalid_input", "Укажите дату с часовым поясом", status=422)
-    return value.astimezone(UTC)
+    try:
+        return value.astimezone(UTC)
+    except (OverflowError, ValueError) as exc:
+        raise DomainError(
+            "invalid_input", "Дата выходит за поддерживаемый диапазон UTC", status=422
+        ) from exc
 
 
 def aware(value):
@@ -120,9 +124,15 @@ class RentalService:
         if exclude:
             query = query.where(bookings.c.id != exclude)
         rows = conn.execute(query).mappings().all()
+        return self._timeline(rows, start, end)
+
+    @staticmethod
+    def _timeline(rows, start, end):
         events = {start: [], end: []}
         for row in rows:
             left, right = max(start, aware(row["start_at"])), min(end, aware(row["end_at"]))
+            if left >= right:
+                continue
             events.setdefault(left, []).append((row["id"], row["quantity"]))
             events.setdefault(right, []).append((row["id"], -row["quantity"]))
         points, active, segments = sorted(events), {}, []
@@ -179,6 +189,176 @@ class RentalService:
                     }
                 )
             return result
+
+    def alternatives(self, payload):
+        normalized = self._normalize({**payload, "label": "Поиск периода", "ttl_minutes": 15})
+        start, end = utc(normalized["start_at"]), utc(normalized["end_at"])
+        horizon = utc(payload.get("search_until"))
+        limit = integer(payload.get("limit", 3), 1, 5)
+        now = self.clock()
+        if start < now:
+            raise DomainError("past_interval", "Начало поиска уже прошло", status=422)
+        # Вычитание безопасно и для года 9999; сложение start + 30 дней может переполниться.
+        if horizon < end or horizon - start > timedelta(days=30):
+            raise DomainError(
+                "invalid_horizon",
+                "Поиск ограничен 30 сутками и должен вмещать исходный период",
+                status=422,
+            )
+        duration = end - start
+        microseconds = (
+            duration.days * 86400 + duration.seconds
+        ) * 1_000_000 + duration.microseconds
+        requested = normalized["items"]
+        ids = [item["product_id"] for item in requested]
+        # Один SELECT даёт согласованные остатки, ставки и брони даже при READ COMMITTED.
+        reservations = (
+            select(
+                items.c.product_id,
+                bookings.c.id.label("booking_id"),
+                bookings.c.start_at,
+                bookings.c.end_at,
+                bookings.c.status,
+                items.c.quantity,
+            )
+            .join(bookings, items.c.booking_id == bookings.c.id)
+            .where(
+                items.c.product_id.in_(ids),
+                or_(
+                    bookings.c.status == "checked_out",
+                    and_(
+                        self._active(now), bookings.c.start_at < horizon, bookings.c.end_at > start
+                    ),
+                ),
+            )
+            .subquery("reservations")
+        )
+        query = (
+            select(
+                products,
+                reservations.c.booking_id,
+                reservations.c.start_at,
+                reservations.c.end_at,
+                reservations.c.status,
+                reservations.c.quantity,
+            )
+            .outerjoin(reservations, products.c.id == reservations.c.product_id)
+            .where(products.c.id.in_(ids))
+        )
+        with self.db.transaction() as conn:
+            rows = conn.execute(query).mappings().all()
+        catalog, occupancy = {}, {product_id: [] for product_id in ids}
+        for row in rows:
+            product_id = row["id"]
+            catalog[product_id] = {column.name: row[column.name] for column in products.columns}
+            if row["booking_id"]:
+                occupancy[product_id].append(
+                    {
+                        "id": row["booking_id"],
+                        "start_at": aware(row["start_at"]),
+                        "end_at": aware(row["end_at"]),
+                        "quantity": row["quantity"],
+                        "status": row["status"],
+                    }
+                )
+        if len(catalog) != len(ids):
+            raise DomainError("not_found", "Оборудование не найдено", status=404)
+        snapshot = []
+        shortages = []
+        for item in requested:
+            product = catalog[item["product_id"]]
+            issued = [row for row in occupancy[product["id"]] if row["status"] == "checked_out"]
+            snapshot.append(
+                {
+                    "product_id": product["id"],
+                    "name": product["name"],
+                    "requested": item["quantity"],
+                    "capacity": product["capacity"],
+                    "rate_cents": product["daily_rate_cents"],
+                    "physical_available": product["capacity"]
+                    - sum(row["quantity"] for row in issued),
+                    "overdue_quantity": sum(
+                        row["quantity"] for row in issued if row["end_at"] <= now
+                    ),
+                }
+            )
+            if item["quantity"] > product["capacity"]:
+                shortages.append(
+                    {
+                        "product_id": product["id"],
+                        "name": product["name"],
+                        "requested": item["quantity"],
+                        "capacity": product["capacity"],
+                    }
+                )
+        result = {
+            "generated_at": iso(now),
+            "duration_microseconds": microseconds,
+            "advisory": True,
+            "search_until": iso(horizon),
+            "alternatives": [],
+            "items": snapshot,
+            "reason": "no_window",
+            "shortages": shortages,
+        }
+        if shortages:
+            result["reason"] = "insufficient_fleet"
+            return result
+        total = self._price(
+            [{**item, "quantity": item["requested"]} for item in snapshot], start, end
+        )
+        timelines = {}
+        blocked = []
+        for item in snapshot:
+            product_id = item["product_id"]
+            timeline = self._timeline(occupancy[product_id], start, horizon)
+            timelines[product_id] = timeline
+            blocked.extend(
+                (utc(segment["start_at"]), utc(segment["end_at"]))
+                for segment in timeline
+                if segment["reserved"] + item["requested"] > item["capacity"]
+            )
+        # Объединяем недостаток ресурса всех позиций; смежные занятые интервалы тоже сливаются.
+        merged = []
+        for left, right in sorted(blocked):
+            if merged and left <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(right, merged[-1][1]))
+            else:
+                merged.append((left, right))
+        free = []
+        cursor = start
+        for left, right in merged:
+            if cursor < left:
+                free.append((cursor, left))
+            cursor = max(cursor, right)
+        if cursor < horizon:
+            free.append((cursor, horizon))
+        for left, right in free:
+            if right - left < duration:
+                continue
+            candidate_end = left + duration
+            availability = []
+            for item in snapshot:
+                peak = max(
+                    segment["reserved"]
+                    for segment in timelines[item["product_id"]]
+                    if utc(segment["start_at"]) < candidate_end and utc(segment["end_at"]) > left
+                )
+                availability.append({**item, "minimum_available": item["capacity"] - peak})
+            result["alternatives"].append(
+                {
+                    "start_at": iso(left),
+                    "end_at": iso(candidate_end),
+                    "latest_start": iso(right - duration),
+                    "total_cents": total,
+                    "items": availability,
+                }
+            )
+            if len(result["alternatives"]) == limit:
+                break
+        if result["alternatives"]:
+            result["reason"] = None
+        return result
 
     def _check_capacity(self, conn, catalog, requested, start, end, now, exclude=None):
         conflicts = []
@@ -310,7 +490,11 @@ class RentalService:
 
     @staticmethod
     def _price(line_items, start, end):
-        days = math.ceil((end - start).total_seconds() / 86400)
+        duration = end - start
+        microseconds = (
+            duration.days * 86400 + duration.seconds
+        ) * 1_000_000 + duration.microseconds
+        days = (microseconds + 86_400_000_000 - 1) // 86_400_000_000
         total = days * sum(item["quantity"] * item["rate_cents"] for item in line_items)
         if total > 9_007_199_254_740_991:
             raise DomainError(

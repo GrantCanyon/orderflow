@@ -25,6 +25,7 @@
 | `POST /api/products` | Добавить позицию; администратор |
 | `PATCH /api/products/{id}` | Изменить имя, категорию, остаток, ставку; администратор |
 | `GET /api/availability?start=…&end=…` | Доступность и временные сегменты |
+| `POST /api/alternatives` | Найти точные свободные периоды для нового комплекта, без записи |
 | `GET /api/bookings` | Список с `status`, `search`, `limit` 1–200 и `offset` |
 | `GET /api/bookings/{id}` | Бронь, позиции и эффективный статус |
 | `POST /api/bookings` | Создать резерв; обязателен `Idempotency-Key` |
@@ -116,3 +117,9 @@ Invoke-RestMethod 'http://127.0.0.1:8000/api/bookings' -Method Post -Headers $he
 `401 unauthorized` — неверный ключ; `403 forbidden` — недостаточно прав; `404 not_found` — объект отсутствует. Ошибки полей, даты, длительности, TTL и слишком большой суммы возвращают `422`. Конфликт ресурса, ключа или перехода — `409`.
 
 Коды для логики клиента: `capacity_conflict`, `physical_stock_conflict`, `idempotency_conflict`, `invalid_transition`, `outside_window`, `invalid_input`, `invalid_interval`, `past_interval`, `quote_too_large`, `sku_conflict`.
+
+## Альтернативные периоды
+
+`POST /api/alternatives` принимает `start_at`, `end_at`, `search_until`, `items` и `limit` 1–5. Длительность сохраняется точно, весь вариант должен заканчиваться до горизонта, а горизонт ограничен 30 сутками от начала. Авторизация нужна, роль наблюдателя достаточна. Поиск ничего не резервирует.
+
+Ответ: `duration_microseconds` (целое число), `generated_at`, `advisory`, список вариантов с `start_at`, `end_at`, включительным `latest_start`, предварительной стоимостью и минимальными доступными количествами. При отсутствии вариантов `reason` объясняет `no_window` или `insufficient_fleet`. Полный контракт и примеры границ — в [описании алгоритма](alternatives.md). Ошибка горизонта имеет код `invalid_horizon` и статус `422`.

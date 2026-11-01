@@ -1,55 +1,273 @@
 <!doctype html>
 <html lang="ru">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#173f35">
-  <title>OrderFlow — пункт проката</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script type="module" src="/static/app.js"></script>
-</head>
-<body>
-<a class="skip" href="#workspace">К рабочей области</a>
-<aside class="sidebar">
-  <a href="/" class="brand"><span class="brand-mark">≋</span>OrderFlow<span class="brand-dot">.</span></a>
-  <div class="workspace-label">ПУНКТ ПРОКАТА <span>01</span></div>
-  <nav aria-label="Разделы">
-    <button class="nav-item active" data-view="bookings"><span>▦</span> Бронирования <b id="nav-count">—</b></button>
-    <button class="nav-item" data-view="availability"><span>▥</span> Доступность</button>
-    <button class="nav-item" data-view="inventory"><span>◇</span> Оборудование</button>
-    <button class="nav-item" data-view="audit"><span>↺</span> Журнал действий</button>
-  </nav>
-  <div class="sidebar-note"><span class="live-dot"></span> Время — тоже ресурс<p>Одна единица оборудования.<br>Много событий. Без пересечений.</p></div>
-  <button id="identity" class="identity"><span class="avatar">ОФ</span><span><strong id="identity-name">Вход в систему</strong><small id="identity-role">Ключ доступа</small></span><span>↗</span></button>
-</aside>
-<div class="shell">
-  <header class="topbar"><span>Рабочее пространство <span class="slash">/</span> <strong id="breadcrumb">Бронирования</strong></span><div><span id="demo-badge" class="demo-badge" hidden>УЧЕБНЫЕ ДАННЫЕ</span><span id="today"></span><button id="mobile-identity" class="text-button" aria-label="Сменить ключ доступа">Вход ↗</button></div></header>
-  <main id="workspace" tabindex="-1">
-    <div class="page-heading"><div><p class="eyebrow">КАЖДОЕ СОБЫТИЕ ПОД КОНТРОЛЕМ</p><h1 id="page-title">Планы меняются.<br><span>Оборудование учтено.</span></h1><p id="page-description">Брони, выдачи и возвраты — в одном рабочем ритме.</p></div><button id="new-booking" class="button primary"><span>＋</span> Новое бронирование</button></div>
-    <div id="global-error" class="notice danger" role="alert" hidden></div>
-    <section id="metrics" class="metrics" aria-label="Показатели текущей выборки"></section>
-    <div id="overdue-banner" class="notice warning" hidden></div>
-    <section id="bookings-view" class="view">
-      <div class="section-heading"><h2>Доска бронирований <span id="board-count" class="count">0</span></h2><button id="refresh" class="text-button">↻ Обновить</button></div>
-      <div class="toolbar"><div class="filters" aria-label="Фильтр статуса">
-        <button data-status="" class="filter active">Все</button><button data-status="hold" class="filter">Резервы</button><button data-status="confirmed" class="filter">Подтверждены</button><button data-status="checked_out" class="filter">Выданы</button><button data-status="overdue" class="filter">Просрочены</button><button data-status="returned" class="filter">Возвращены</button>
-      </div><label class="search"><span>⌕</span><input id="search" placeholder="Название или номер" aria-label="Поиск бронирования" maxlength="120"></label></div>
-      <div class="table-scroll"><table class="booking-table"><thead><tr><th>Событие / номер</th><th>Период · UTC</th><th>Оборудование</th><th>Статус</th><th class="numeric">Стоимость</th><th><span class="sr-only">Открыть</span></th></tr></thead><tbody id="booking-rows"></tbody></table></div>
-      <div id="booking-empty" class="empty" hidden><span>◇</span><h3>Здесь пока свободно</h3><p>Измените фильтр или создайте первое бронирование.</p></div>
-      <div class="table-footer"><span id="list-note">Показаны последние 100 записей. Время — UTC.</span><div><button id="prev-page" class="text-button" disabled>← Назад</button><button id="next-page" class="text-button">Далее →</button></div></div>
-    </section>
-    <section id="availability-view" class="view" hidden>
-      <div class="section-heading"><h2>Временная шкала</h2><span class="muted">Планирование по интервалам [начало, конец)</span></div>
-      <form id="availability-form" class="period-form"><label>Начало · UTC<input type="datetime-local" id="availability-start" required></label><span>→</span><label>Окончание · UTC<input type="datetime-local" id="availability-end" required></label><button class="button secondary">Проверить доступность</button></form>
-      <div class="legend"><span><i class="legend-free"></i> Свободно</span><span><i class="legend-busy"></i> Часть занята</span><span><i class="legend-full"></i> Всё занято</span><span>Наведите на сегмент: точный интервал и занятые единицы.</span></div>
-      <div id="timeline"></div><div class="explainer"><strong>Плановый остаток ≠ оборудование на складе</strong><p>Шкала показывает брони в выбранный период. Физический остаток учитывает всё выданное прямо сейчас, включая просроченные возвраты. При выдаче система проверяет его повторно.</p></div>
-    </section>
-    <section id="inventory-view" class="view" hidden><div class="section-heading"><h2>Парк оборудования</h2><span class="muted">Цена за каждые начатые 24 часа</span></div><div id="catalog" class="catalog"></div></section>
-    <section id="audit-view" class="view" hidden><div class="section-heading"><h2>История операций</h2><button id="expire" class="button secondary" hidden>Завершить истёкшие резервы</button></div><p class="muted">Успешные изменения и авторы. Записи создаются вместе с операцией.</p><div id="audit-list"></div><button id="more-audit" class="button secondary">Загрузить ещё</button></section>
-    <footer class="footer"><span>OrderFlow <b>·</b> Операции без накладок</span><span>Все даты в UTC <b>·</b> Стоимость в ₽</span></footer>
-  </main>
-</div>
-<dialog id="login-dialog" aria-labelledby="login-title"><form id="login-form" class="dialog-content narrow"><div class="dialog-top"><p class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</p><button class="icon-button" type="button" data-close="login-dialog" aria-label="Закрыть">×</button></div><h2 id="login-title">Ваш ключ к порядку</h2><p class="muted">Ключ хранится только в памяти этой вкладки.</p><label>Ключ доступа<input id="api-key" type="password" required autocomplete="off" placeholder="Введите ключ"></label><div id="demo-logins" class="demo-logins" hidden><p>Учебные роли</p><button type="button" data-demo="operator">Оператор</button><button type="button" data-demo="viewer">Наблюдатель</button><button type="button" data-demo="admin">Администратор</button></div><div id="login-error" role="alert" class="notice danger" hidden></div><button class="button primary wide">Войти в пространство →</button></form></dialog>
-<dialog id="composer-dialog" class="large-dialog" aria-labelledby="composer-title"><form id="composer" class="dialog-content"><div class="dialog-top"><p class="eyebrow">НОВОЕ СОБЫТИЕ</p><button class="icon-button" type="button" data-close="composer-dialog" aria-label="Закрыть">×</button></div><h2 id="composer-title">Соберём всё необходимое</h2><p class="muted">Создаётся временный резерв на 15 минут. Затем подтвердите бронь.</p><label>Название события<input name="label" required maxlength="120" placeholder="Например, открытая сцена"></label><div class="form-grid"><label>Начало · UTC<input name="start" type="datetime-local" required></label><label>Окончание · UTC<input name="end" type="datetime-local" required></label></div><div class="section-heading"><h3>Оборудование</h3><button type="button" id="composer-check" class="text-button">Проверить доступность ↗</button></div><div id="composer-items"></div><div id="composer-error" role="alert" class="notice danger" hidden></div><div id="composer-conflicts"></div><div class="quote"><div><small>Предварительная стоимость</small><strong id="quote-total">0 ₽</strong><span id="quote-days">Выберите оборудование</span></div><button id="reserve" class="button primary">Создать резерв →</button></div><p class="fineprint">Цена фиксируется при создании. Доступность проверяется в момент сохранения.</p></form></dialog>
-<dialog id="inspector-dialog" class="large-dialog" aria-labelledby="inspector-title"><div class="dialog-content"><div class="dialog-top"><p class="eyebrow">КАРТОЧКА БРОНИРОВАНИЯ</p><button class="icon-button" type="button" data-close="inspector-dialog" aria-label="Закрыть">×</button></div><div id="inspector"></div><div id="inspector-error" role="alert" class="notice danger" hidden></div></div></dialog>
-<div id="toast" role="status" class="toast" hidden></div>
-</body></html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#173f35" />
+    <title>OrderFlow — пункт проката</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#workspace">К рабочей области</a>
+    <aside class="sidebar">
+      <a href="/" class="brand"
+        ><span class="brand-mark">≋</span>OrderFlow<span class="brand-dot">.</span></a
+      >
+      <div class="workspace-label">ПУНКТ ПРОКАТА <span>01</span></div>
+      <nav aria-label="Разделы">
+        <button class="nav-item active" data-view="bookings">
+          <span>▦</span> Бронирования <b id="nav-count">—</b>
+        </button>
+        <button class="nav-item" data-view="availability"><span>▥</span> Доступность</button>
+        <button class="nav-item" data-view="inventory"><span>◇</span> Оборудование</button>
+        <button class="nav-item" data-view="audit"><span>↺</span> Журнал действий</button>
+      </nav>
+      <div class="sidebar-note">
+        <span class="live-dot"></span> Время — тоже ресурс
+        <p>Одна единица оборудования.<br />Много событий. Без пересечений.</p>
+      </div>
+      <button id="identity" class="identity">
+        <span class="avatar">ОФ</span
+        ><span
+          ><strong id="identity-name">Вход в систему</strong
+          ><small id="identity-role">Ключ доступа</small></span
+        ><span>↗</span>
+      </button>
+    </aside>
+    <div class="shell">
+      <header class="topbar">
+        <span
+          >Рабочее пространство <span class="slash">/</span>
+          <strong id="breadcrumb">Бронирования</strong></span
+        >
+        <div>
+          <span id="demo-badge" class="demo-badge" hidden>УЧЕБНЫЕ ДАННЫЕ</span
+          ><span id="today"></span
+          ><button id="mobile-identity" class="text-button" aria-label="Сменить ключ доступа">
+            Вход ↗
+          </button>
+        </div>
+      </header>
+      <main id="workspace" tabindex="-1">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">КАЖДОЕ СОБЫТИЕ ПОД КОНТРОЛЕМ</p>
+            <h1 id="page-title">Планы меняются.<br /><span>Оборудование учтено.</span></h1>
+            <p id="page-description">Брони, выдачи и возвраты — в одном рабочем ритме.</p>
+          </div>
+          <button id="new-booking" class="button primary">
+            <span>＋</span> Новое бронирование
+          </button>
+        </div>
+        <div id="global-error" class="notice danger" role="alert" hidden></div>
+        <section id="metrics" class="metrics" aria-label="Показатели текущей выборки"></section>
+        <div id="overdue-banner" class="notice warning" hidden></div>
+        <section id="bookings-view" class="view">
+          <div class="section-heading">
+            <h2>Доска бронирований <span id="board-count" class="count">0</span></h2>
+            <button id="refresh" class="text-button">↻ Обновить</button>
+          </div>
+          <div class="toolbar">
+            <div class="filters" aria-label="Фильтр статуса">
+              <button data-status="" class="filter active">Все</button
+              ><button data-status="hold" class="filter">Резервы</button
+              ><button data-status="confirmed" class="filter">Подтверждены</button
+              ><button data-status="checked_out" class="filter">Выданы</button
+              ><button data-status="overdue" class="filter">Просрочены</button
+              ><button data-status="returned" class="filter">Возвращены</button>
+            </div>
+            <label class="search"
+              ><span>⌕</span
+              ><input
+                id="search"
+                placeholder="Название или номер"
+                aria-label="Поиск бронирования"
+                maxlength="120"
+            /></label>
+          </div>
+          <div class="table-scroll">
+            <table class="booking-table">
+              <thead>
+                <tr>
+                  <th>Событие / номер</th>
+                  <th>Период · UTC</th>
+                  <th>Оборудование</th>
+                  <th>Статус</th>
+                  <th class="numeric">Стоимость</th>
+                  <th><span class="sr-only">Открыть</span></th>
+                </tr>
+              </thead>
+              <tbody id="booking-rows"></tbody>
+            </table>
+          </div>
+          <div id="booking-empty" class="empty" hidden>
+            <span>◇</span>
+            <h3>Здесь пока свободно</h3>
+            <p>Измените фильтр или создайте первое бронирование.</p>
+          </div>
+          <div class="table-footer">
+            <span id="list-note">Показаны последние 100 записей. Время — UTC.</span>
+            <div>
+              <button id="prev-page" class="text-button" disabled>← Назад</button
+              ><button id="next-page" class="text-button">Далее →</button>
+            </div>
+          </div>
+        </section>
+        <section id="availability-view" class="view" hidden>
+          <div class="section-heading">
+            <h2>Временная шкала</h2>
+            <span class="muted">Планирование по интервалам [начало, конец)</span>
+          </div>
+          <form id="availability-form" class="period-form">
+            <label
+              >Начало · UTC<input type="datetime-local" id="availability-start" required /></label
+            ><span>→</span
+            ><label
+              >Окончание · UTC<input type="datetime-local" id="availability-end" required /></label
+            ><button class="button secondary">Проверить доступность</button>
+          </form>
+          <div class="legend">
+            <span><i class="legend-free"></i> Свободно</span
+            ><span><i class="legend-busy"></i> Часть занята</span
+            ><span><i class="legend-full"></i> Всё занято</span
+            ><span>Наведите на сегмент: точный интервал и занятые единицы.</span>
+          </div>
+          <div id="timeline"></div>
+          <div class="explainer">
+            <strong>Плановый остаток ≠ оборудование на складе</strong>
+            <p>
+              Шкала показывает брони в выбранный период. Физический остаток учитывает всё выданное
+              прямо сейчас, включая просроченные возвраты. При выдаче система проверяет его
+              повторно.
+            </p>
+          </div>
+        </section>
+        <section id="inventory-view" class="view" hidden>
+          <div class="section-heading">
+            <h2>Парк оборудования</h2>
+            <span class="muted">Цена за каждые начатые 24 часа</span>
+          </div>
+          <div id="catalog" class="catalog"></div>
+        </section>
+        <section id="audit-view" class="view" hidden>
+          <div class="section-heading">
+            <h2>История операций</h2>
+            <button id="expire" class="button secondary" hidden>Завершить истёкшие резервы</button>
+          </div>
+          <p class="muted">Успешные изменения и авторы. Записи создаются вместе с операцией.</p>
+          <div id="audit-list"></div>
+          <button id="more-audit" class="button secondary">Загрузить ещё</button>
+        </section>
+        <footer class="footer">
+          <span>OrderFlow <b>·</b> Операции без накладок</span
+          ><span>Все даты в UTC <b>·</b> Стоимость в ₽</span>
+        </footer>
+      </main>
+    </div>
+    <dialog id="login-dialog" aria-labelledby="login-title">
+      <form id="login-form" class="dialog-content narrow">
+        <div class="dialog-top">
+          <p class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</p>
+          <button class="icon-button" type="button" data-close="login-dialog" aria-label="Закрыть">
+            ×
+          </button>
+        </div>
+        <h2 id="login-title">Ваш ключ к порядку</h2>
+        <p class="muted">Ключ хранится только в памяти этой вкладки.</p>
+        <label
+          >Ключ доступа<input
+            id="api-key"
+            type="password"
+            required
+            autocomplete="off"
+            placeholder="Введите ключ"
+        /></label>
+        <div id="demo-logins" class="demo-logins" hidden>
+          <p>Учебные роли</p>
+          <button type="button" data-demo="operator">Оператор</button
+          ><button type="button" data-demo="viewer">Наблюдатель</button
+          ><button type="button" data-demo="admin">Администратор</button>
+        </div>
+        <div id="login-error" role="alert" class="notice danger" hidden></div>
+        <button class="button primary wide">Войти в пространство →</button>
+      </form>
+    </dialog>
+    <dialog id="composer-dialog" class="large-dialog" aria-labelledby="composer-title">
+      <form id="composer" class="dialog-content">
+        <div class="dialog-top">
+          <p class="eyebrow">НОВОЕ СОБЫТИЕ</p>
+          <button
+            class="icon-button"
+            type="button"
+            data-close="composer-dialog"
+            aria-label="Закрыть"
+          >
+            ×
+          </button>
+        </div>
+        <h2 id="composer-title">Соберём всё необходимое</h2>
+        <p class="muted">Создаётся временный резерв на 15 минут. Затем подтвердите бронь.</p>
+        <label
+          >Название события<input
+            name="label"
+            required
+            maxlength="120"
+            placeholder="Например, открытая сцена"
+        /></label>
+        <div class="form-grid">
+          <label
+            >Начало · UTC<input name="start" type="datetime-local" step="0.001" required /></label
+          ><label
+            >Окончание · UTC<input name="end" type="datetime-local" step="0.001" required
+          /></label>
+        </div>
+        <p id="exact-period" class="notice exact-period" hidden></p>
+        <div class="section-heading">
+          <h3>Оборудование</h3>
+          <button type="button" id="composer-check" class="text-button">
+            Проверить доступность ↗
+          </button>
+        </div>
+        <div id="composer-items"></div>
+        <div id="composer-error" role="alert" class="notice danger" hidden></div>
+        <div id="composer-conflicts"></div>
+        <div id="alternative-tools" hidden>
+          <button id="find-alternatives" type="button" class="button secondary">
+            Найти другой период →
+          </button>
+          <p class="fineprint">Та же длительность и комплект. Поиск вперёд в пределах 30 суток.</p>
+        </div>
+        <div id="alternative-results" aria-live="polite"></div>
+        <div class="quote">
+          <div>
+            <small>Предварительная стоимость</small><strong id="quote-total">0 ₽</strong
+            ><span id="quote-days">Выберите оборудование</span>
+          </div>
+          <button id="reserve" class="button primary">Создать резерв →</button>
+        </div>
+        <p class="fineprint">
+          Цена фиксируется при создании. Доступность проверяется в момент сохранения.
+        </p>
+      </form>
+    </dialog>
+    <dialog id="inspector-dialog" class="large-dialog" aria-labelledby="inspector-title">
+      <div class="dialog-content">
+        <div class="dialog-top">
+          <p class="eyebrow">КАРТОЧКА БРОНИРОВАНИЯ</p>
+          <button
+            class="icon-button"
+            type="button"
+            data-close="inspector-dialog"
+            aria-label="Закрыть"
+          >
+            ×
+          </button>
+        </div>
+        <div id="inspector"></div>
+        <div id="inspector-error" role="alert" class="notice danger" hidden></div>
+      </div>
+    </dialog>
+    <div id="toast" role="status" class="toast" hidden></div>
+  </body>
+</html>
