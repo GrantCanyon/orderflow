@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: orderflow
+      POSTGRES_DB: orderflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Укажите POSTGRES_PASSWORD}
+    volumes:
+      - orderflow-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderflow -d orderflow"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  app:
+    build: .
+    environment:
+      ORDERFLOW_DATABASE_URL: postgresql+psycopg://orderflow:${POSTGRES_PASSWORD}@db:5432/orderflow
+    command: ["orderflow", "demo", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  orderflow-data:

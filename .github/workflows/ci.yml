@@ -1,0 +1,46 @@
+name: Проверка OrderFlow
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    name: Тесты / ${{ matrix.database }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [sqlite, postgresql]
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: orderflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d orderflow_test"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Установить зависимости
+        run: python -m pip install -e '.[dev]'
+      - name: Проверить стиль
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: Проверить JavaScript
+        run: node --check src/orderflow/static/app.js
+      - name: Тесты SQLite
+        if: matrix.database == 'sqlite'
+        run: python -m pytest -q
+      - name: Тесты PostgreSQL
+        if: matrix.database == 'postgresql'
+        env:
+          ORDERFLOW_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/orderflow_test
+        run: python -m pytest -q
