@@ -105,4 +105,31 @@ def seed_demo(db, now=None):
         [(0, 2), (1, 2)],
         "returned",
     )
+    # Учебные работы создаются через обычные проверки с управляемыми часами.
+    cursor = now - timedelta(hours=4)
+    overdue = service.create_maintenance(
+        "Демо · администратор",
+        "maintenance-overdue",
+        {
+            "product_id": catalog[6]["id"],
+            "quantity": 3,
+            "start_at": iso(cursor + timedelta(hours=1)),
+            "end_at": iso(now - timedelta(hours=1)),
+            "reason": "Проверка изоляции кабельных катушек · демонстрационная просрочка",
+        },
+    )
+    cursor += timedelta(hours=1)
+    service.transition_maintenance("Демо · техник", overdue["id"], "start")
+    cursor = now
+    service.create_maintenance(
+        "Демо · администратор",
+        "maintenance-planned",
+        {
+            "product_id": catalog[3]["id"],
+            "quantity": 2,
+            "start_at": iso(now + timedelta(hours=1)),
+            "end_at": iso(now + timedelta(hours=4)),
+            "reason": "Проверка фиксаторов световых стоек",
+        },
+    )
     return True

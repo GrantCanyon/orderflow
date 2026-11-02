@@ -1,12 +1,12 @@
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, literal, or_, select, union_all, update
 from sqlalchemy.exc import IntegrityError
 
-from .db import audit_events, bookings, idempotency, items, products
+from .db import audit_events, bookings, idempotency, items, maintenance, products
 from .errors import DomainError
 from .identity import actor as identify
 
@@ -51,6 +51,23 @@ def text(value, maximum):
             "invalid_input", "Текст содержит недопустимые символы Unicode", status=422
         )
     return value.strip()
+
+
+def booking_identifier(value):
+    text(value, 36)
+    if len(value) > 36:
+        raise DomainError("invalid_input", "Идентификатор слишком длинный", status=422)
+    # Проверяем строку, но не меняем цель чтения, записи и внешнего ключа аудита.
+    return value
+
+
+def resource_uuid(value):
+    if not isinstance(value, str):
+        raise DomainError("invalid_input", "Идентификатор должен быть UUID", status=422)
+    try:
+        return str(UUID(value))
+    except ValueError:
+        raise DomainError("invalid_input", "Идентификатор должен быть UUID", status=422) from None
 
 
 class RentalService:
@@ -130,7 +147,20 @@ class RentalService:
         )
         if exclude:
             query = query.where(bookings.c.id != exclude)
-        rows = conn.execute(query).mappings().all()
+        query = query.add_columns(literal("booking").label("kind"))
+        blocked = select(
+            maintenance.c.id,
+            maintenance.c.start_at,
+            maintenance.c.end_at,
+            maintenance.c.quantity,
+            literal("maintenance").label("kind"),
+        ).where(
+            maintenance.c.product_id == product_id,
+            maintenance.c.status.in_(["planned", "active"]),
+            maintenance.c.start_at < end,
+            maintenance.c.end_at > start,
+        )
+        rows = conn.execute(union_all(query, blocked)).mappings().all()
         return self._timeline(rows, start, end)
 
     @staticmethod
@@ -140,8 +170,12 @@ class RentalService:
             left, right = max(start, aware(row["start_at"])), min(end, aware(row["end_at"]))
             if left >= right:
                 continue
-            events.setdefault(left, []).append((row["id"], row["quantity"]))
-            events.setdefault(right, []).append((row["id"], -row["quantity"]))
+            events.setdefault(left, []).append(
+                ((row.get("kind", "booking"), row["id"]), row["quantity"])
+            )
+            events.setdefault(right, []).append(
+                ((row.get("kind", "booking"), row["id"]), -row["quantity"])
+            )
         points, active, segments = sorted(events), {}, []
         for index, point in enumerate(points[:-1]):
             for booking_id, delta in events[point]:
@@ -153,7 +187,8 @@ class RentalService:
                     "start_at": iso(point),
                     "end_at": iso(points[index + 1]),
                     "reserved": sum(active.values()),
-                    "booking_ids": sorted(active),
+                    "booking_ids": sorted(key[1] for key in active if key[0] == "booking"),
+                    "maintenance_ids": sorted(key[1] for key in active if key[0] == "maintenance"),
                 }
             )
         return segments
@@ -191,6 +226,10 @@ class RentalService:
                                 bookings.c.end_at <= now,
                             )
                         ).scalar_one(),
+                        "maintenance_active_quantity": self._maintenance_out(conn, product["id"]),
+                        "maintenance_overdue_quantity": self._maintenance_out(
+                            conn, product["id"], now
+                        ),
                         "peak_reserved": peak,
                         "segments": segments,
                     }
@@ -227,6 +266,7 @@ class RentalService:
                 bookings.c.end_at,
                 bookings.c.status,
                 items.c.quantity,
+                literal("booking").label("kind"),
             )
             .join(bookings, items.c.booking_id == bookings.c.id)
             .where(
@@ -238,8 +278,27 @@ class RentalService:
                     ),
                 ),
             )
-            .subquery("reservations")
         )
+        blocked = select(
+            maintenance.c.product_id,
+            maintenance.c.id.label("booking_id"),
+            maintenance.c.start_at,
+            maintenance.c.end_at,
+            maintenance.c.status,
+            maintenance.c.quantity,
+            literal("maintenance").label("kind"),
+        ).where(
+            maintenance.c.product_id.in_(ids),
+            or_(
+                maintenance.c.status == "active",
+                and_(
+                    maintenance.c.status == "planned",
+                    maintenance.c.start_at < horizon,
+                    maintenance.c.end_at > start,
+                ),
+            ),
+        )
+        reservations = union_all(reservations, blocked).subquery("reservations")
         query = (
             select(
                 products,
@@ -248,6 +307,7 @@ class RentalService:
                 reservations.c.end_at,
                 reservations.c.status,
                 reservations.c.quantity,
+                reservations.c.kind,
             )
             .outerjoin(reservations, products.c.id == reservations.c.product_id)
             .where(products.c.id.in_(ids))
@@ -266,6 +326,7 @@ class RentalService:
                         "end_at": aware(row["end_at"]),
                         "quantity": row["quantity"],
                         "status": row["status"],
+                        "kind": row["kind"],
                     }
                 )
         if len(catalog) != len(ids):
@@ -275,6 +336,7 @@ class RentalService:
         for item in requested:
             product = catalog[item["product_id"]]
             issued = [row for row in occupancy[product["id"]] if row["status"] == "checked_out"]
+            maintained = [row for row in occupancy[product["id"]] if row["status"] == "active"]
             snapshot.append(
                 {
                     "product_id": product["id"],
@@ -283,7 +345,11 @@ class RentalService:
                     "capacity": product["capacity"],
                     "rate_cents": product["daily_rate_cents"],
                     "physical_available": product["capacity"]
-                    - sum(row["quantity"] for row in issued),
+                    - sum(row["quantity"] for row in issued + maintained),
+                    "maintenance_active_quantity": sum(row["quantity"] for row in maintained),
+                    "maintenance_overdue_quantity": sum(
+                        row["quantity"] for row in maintained if row["end_at"] <= now
+                    ),
                     "overdue_quantity": sum(
                         row["quantity"] for row in issued if row["end_at"] <= now
                     ),
@@ -510,6 +576,7 @@ class RentalService:
         return total
 
     def _booking(self, conn, booking_id, lock=False):
+        booking_id = booking_identifier(booking_id)
         query = select(bookings).where(bookings.c.id == booking_id)
         row = conn.execute(query.with_for_update() if lock else query).mappings().first()
         if not row:
@@ -580,6 +647,7 @@ class RentalService:
             return [self._booking(conn, booking_id) for booking_id in ids]
 
     def _locked_booking(self, conn, booking_id):
+        booking_id = booking_identifier(booking_id)
         product_ids = (
             conn.execute(select(items.c.product_id).where(items.c.booking_id == booking_id))
             .scalars()
@@ -588,12 +656,23 @@ class RentalService:
         catalog = self._lock_products(conn, product_ids)
         return self._booking(conn, booking_id, lock=True), catalog
 
+    def _maintenance_out(self, conn, product_id, overdue_at=None):
+        query = select(func.coalesce(func.sum(maintenance.c.quantity), 0)).where(
+            maintenance.c.product_id == product_id, maintenance.c.status == "active"
+        )
+        if overdue_at is not None:
+            query = query.where(maintenance.c.end_at <= overdue_at)
+        return conn.execute(query).scalar_one()
+
     def _physical_out(self, conn, product_id):
-        return conn.execute(
-            select(func.coalesce(func.sum(items.c.quantity), 0))
-            .join(bookings, items.c.booking_id == bookings.c.id)
-            .where(items.c.product_id == product_id, bookings.c.status == "checked_out")
-        ).scalar_one()
+        return (
+            self._maintenance_out(conn, product_id)
+            + conn.execute(
+                select(func.coalesce(func.sum(items.c.quantity), 0))
+                .join(bookings, items.c.booking_id == bookings.c.id)
+                .where(items.c.product_id == product_id, bookings.c.status == "checked_out")
+            ).scalar_one()
+        )
 
     def transition(self, actor, booking_id, action):
         transitions = {
@@ -622,7 +701,12 @@ class RentalService:
                         conflicts.append(
                             {
                                 "product_id": item["product_id"],
-                                "checked_out": outstanding,
+                                "checked_out": outstanding
+                                - self._maintenance_out(conn, item["product_id"]),
+                                "physically_occupied": outstanding,
+                                "active_maintenance": self._maintenance_out(
+                                    conn, item["product_id"]
+                                ),
                                 "capacity": capacity,
                                 "requested": item["quantity"],
                             }
@@ -630,7 +714,7 @@ class RentalService:
                 if conflicts:
                     raise DomainError(
                         "physical_stock_conflict",
-                        "Оборудование ещё не возвращено",
+                        "Оборудование выдано или находится на обслуживании",
                         {"conflicts": conflicts},
                     )
             conn.execute(update(bookings).where(bookings.c.id == booking_id).values(status=target))
@@ -690,7 +774,8 @@ class RentalService:
             if "capacity" in changes:
                 if self._physical_out(conn, product_id) > changes["capacity"]:
                     raise DomainError(
-                        "physical_stock_conflict", "Новый остаток меньше выданного оборудования"
+                        "physical_stock_conflict",
+                        "Новый остаток меньше физически занятого оборудования",
                     )
                 now = self.clock()
                 segments = self._segments(
@@ -745,6 +830,8 @@ class RentalService:
             return count
 
     def audit(self, booking_id=None, limit=100, before_id=None):
+        if booking_id is not None:
+            booking_id = booking_identifier(booking_id)
         integer(limit, 1, 200)
         if before_id is not None:
             integer(before_id, 1, MAX_DATABASE_ID)
@@ -756,3 +843,193 @@ class RentalService:
                 query = query.where(audit_events.c.id < before_id)
             rows = conn.execute(query.order_by(audit_events.c.id.desc()).limit(limit)).mappings()
             return [{**row, "created_at": iso(row["created_at"])} for row in rows]
+
+    def _maintenance(self, conn, maintenance_id, lock=False):
+        maintenance_id = resource_uuid(maintenance_id)
+        query = select(maintenance).where(maintenance.c.id == maintenance_id)
+        row = conn.execute(query.with_for_update() if lock else query).mappings().first()
+        if not row:
+            raise DomainError("not_found", "Обслуживание не найдено", status=404)
+        result = {
+            key: value
+            for key, value in row.items()
+            if key not in {"key", "fingerprint", "creator_id", "creator_name"}
+        }
+        result["created_by"] = row["creator_id"]
+        result["created_by_name"] = row["creator_name"]
+        result["product_name"] = conn.execute(
+            select(products.c.name).where(products.c.id == row["product_id"])
+        ).scalar_one()
+        now = self.clock()
+        result["overdue"] = row["status"] == "active" and aware(row["end_at"]) <= now
+        result["missed"] = row["status"] == "planned" and aware(row["end_at"]) <= now
+        for field in ("started_at", "completed_at"):
+            result[field] = iso(row[field]) if row[field] is not None else None
+        for field in ("start_at", "end_at", "created_at"):
+            result[field] = iso(result[field])
+        return result
+
+    def get_maintenance(self, maintenance_id):
+        with self.db.transaction() as conn:
+            return self._maintenance(conn, maintenance_id)
+
+    def list_maintenance(self, status=None, limit=100, offset=0):
+        integer(limit, 1, 200)
+        integer(offset, 0, 1_000_000)
+        if status not in {None, "planned", "active", "completed", "cancelled", "overdue"}:
+            raise DomainError("invalid_input", "Неизвестное состояние обслуживания", status=422)
+        with self.db.transaction() as conn:
+            query = select(maintenance.c.id)
+            if status == "overdue":
+                query = query.where(
+                    maintenance.c.status == "active", maintenance.c.end_at <= self.clock()
+                )
+            elif status:
+                query = query.where(maintenance.c.status == status)
+            ids = (
+                conn.execute(
+                    query.order_by(maintenance.c.created_at.desc(), maintenance.c.id)
+                    .limit(limit)
+                    .offset(offset)
+                )
+                .scalars()
+                .all()
+            )
+            return [self._maintenance(conn, item_id) for item_id in ids]
+
+    def _maintenance_replay(self, conn, actor, key, fingerprint):
+        row = (
+            conn.execute(
+                select(maintenance.c.id, maintenance.c.fingerprint).where(
+                    maintenance.c.creator_id == actor.id, maintenance.c.key == key
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row:
+            if row["fingerprint"] != fingerprint:
+                raise DomainError(
+                    "idempotency_conflict", "Этот ключ уже использован для другого запроса"
+                )
+            return self._maintenance(conn, row["id"])
+
+    def create_maintenance(self, actor, key, payload):
+        actor = identify(actor)
+        key = text(key, 120)
+        start, end = self._interval(payload.get("start_at"), payload.get("end_at"))
+        normalized = {
+            "product_id": integer(payload.get("product_id"), 1, MAX_DATABASE_ID),
+            "quantity": integer(payload.get("quantity"), 1),
+            "reason": text(payload.get("reason"), 500),
+            "start_at": iso(start),
+            "end_at": iso(end),
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(normalized, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()
+        try:
+            with self.db.transaction(write=True) as conn:
+                replay = self._maintenance_replay(conn, actor, key, fingerprint)
+                if replay:
+                    return replay
+                catalog = self._lock_products(conn, [normalized["product_id"]])
+                replay = self._maintenance_replay(conn, actor, key, fingerprint)
+                if replay:
+                    return replay
+                now = self.clock()
+                if start < now:
+                    raise DomainError("past_interval", "Начало обслуживания уже прошло", status=422)
+                self._check_capacity(conn, catalog, [normalized], start, end, now)
+                maintenance_id = str(uuid4())
+                conn.execute(
+                    insert(maintenance).values(
+                        **{**normalized, "start_at": start, "end_at": end},
+                        id=maintenance_id,
+                        status="planned",
+                        created_at=now,
+                        creator_id=actor.id,
+                        creator_name=actor.name,
+                        key=key,
+                        fingerprint=fingerprint,
+                    )
+                )
+                self._event(
+                    conn,
+                    actor,
+                    "maintenance.create",
+                    {"maintenance_id": maintenance_id, **normalized},
+                )
+                return self._maintenance(conn, maintenance_id)
+        except IntegrityError:
+            with self.db.transaction() as conn:
+                replay = self._maintenance_replay(conn, actor, key, fingerprint)
+                if replay:
+                    return replay
+            raise
+
+    def transition_maintenance(self, actor, maintenance_id, action):
+        actor = identify(actor)
+        maintenance_id = resource_uuid(maintenance_id)
+        transitions = {
+            "start": ("planned", "active"),
+            "complete": ("active", "completed"),
+            "cancel": ("planned", "cancelled"),
+        }
+        if action not in transitions:
+            raise DomainError("invalid_action", "Неизвестное действие", status=422)
+        with self.db.transaction(write=True) as conn:
+            product_id = conn.execute(
+                select(maintenance.c.product_id).where(maintenance.c.id == maintenance_id)
+            ).scalar_one_or_none()
+            if product_id is None:
+                raise DomainError("not_found", "Обслуживание не найдено", status=404)
+            catalog = self._lock_products(conn, [product_id])
+            item = self._maintenance(conn, maintenance_id, lock=True)
+            source, target = transitions[action]
+            # Повтор успешного перехода безопасен и после окончания планового периода.
+            if item["status"] == target:
+                return item
+            if item["status"] != source:
+                raise DomainError(
+                    "invalid_transition", "Действие недоступно в текущем состоянии обслуживания"
+                )
+            if action == "start":
+                now = self.clock()
+                if not utc(item["start_at"]) <= now < utc(item["end_at"]):
+                    raise DomainError(
+                        "outside_window", "Начать обслуживание можно только в его плановый период"
+                    )
+                occupied = self._physical_out(conn, product_id)
+                capacity = catalog[product_id]["capacity"]
+                if occupied + item["quantity"] > capacity:
+                    raise DomainError(
+                        "physical_stock_conflict",
+                        "Оборудование выдано или уже обслуживается",
+                        {
+                            "product_id": product_id,
+                            "physically_occupied": occupied,
+                            "requested": item["quantity"],
+                            "capacity": capacity,
+                        },
+                    )
+            values = {"status": target}
+            if action in {"start", "complete"}:
+                prefix = "started" if action == "start" else "completed"
+                values.update(
+                    {
+                        f"{prefix}_at": self.clock(),
+                        f"{prefix}_by": actor.id,
+                        f"{prefix}_by_name": actor.name,
+                    }
+                )
+            conn.execute(
+                update(maintenance).where(maintenance.c.id == maintenance_id).values(**values)
+            )
+            self._event(
+                conn,
+                actor,
+                f"maintenance.{action}",
+                {"maintenance_id": maintenance_id, "from": source, "to": target},
+            )
+            return self._maintenance(conn, maintenance_id)

@@ -46,6 +46,12 @@ class AlternativesRequest(Payload):
     limit: Annotated[StrictInt, Field(ge=1, le=5)] = 3
 
 
+class MaintenanceCreate(BookingItem):
+    start_at: str
+    end_at: str
+    reason: Annotated[str, Field(min_length=1, max_length=500)]
+
+
 class Reschedule(Payload):
     start_at: str
     end_at: str
@@ -262,6 +268,35 @@ def create_app(db=None, clock=None, principals=None, demo=False):
     @app.post("/api/bookings/{booking_id}/{action}")
     def action(booking_id: str, action: str, principal=Depends(operator)):
         return service.transition(Actor(principal["id"], principal["name"]), booking_id, action)
+
+    @app.get("/api/maintenance")
+    def maintenance_list(
+        status: Literal["planned", "active", "completed", "cancelled", "overdue"] | None = None,
+        limit: Annotated[int, Query(ge=1, le=200)] = 100,
+        offset: Annotated[int, Query(ge=0, le=1_000_000)] = 0,
+        principal=Depends(identity),
+    ):
+        return service.list_maintenance(status, limit, offset)
+
+    @app.get("/api/maintenance/{maintenance_id}")
+    def maintenance_detail(maintenance_id: str, principal=Depends(identity)):
+        return service.get_maintenance(maintenance_id)
+
+    @app.post("/api/maintenance", status_code=201)
+    def maintenance_create(
+        body: MaintenanceCreate,
+        idempotency_key: Annotated[str, Header(min_length=1, max_length=120)],
+        principal=Depends(admin),
+    ):
+        return service.create_maintenance(
+            Actor(principal["id"], principal["name"]), idempotency_key, body.model_dump()
+        )
+
+    @app.post("/api/maintenance/{maintenance_id}/{action}")
+    def maintenance_action(maintenance_id: str, action: str, principal=Depends(admin)):
+        return service.transition_maintenance(
+            Actor(principal["id"], principal["name"]), maintenance_id, action
+        )
 
     @app.get("/api/audit")
     def audit(

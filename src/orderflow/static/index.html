@@ -21,6 +21,7 @@
         </button>
         <button class="nav-item" data-view="availability"><span>▥</span> Доступность</button>
         <button class="nav-item" data-view="inventory"><span>◇</span> Оборудование</button>
+        <button class="nav-item" data-view="maintenance"><span>⚒</span> Обслуживание</button>
         <button class="nav-item" data-view="audit"><span>↺</span> Журнал действий</button>
       </nav>
       <div class="sidebar-note">
@@ -137,9 +138,9 @@
           <div class="explainer">
             <strong>Плановый остаток ≠ оборудование на складе</strong>
             <p>
-              Шкала показывает брони в выбранный период. Физический остаток учитывает всё выданное
-              прямо сейчас, включая просроченные возвраты. При выдаче система проверяет его
-              повторно.
+              Шкала показывает брони и обслуживание в выбранный период. Физический остаток учитывает
+              активное обслуживание и всё выданное прямо сейчас, включая просроченные возвраты. При
+              выдаче система проверяет его повторно.
             </p>
           </div>
         </section>
@@ -149,6 +150,68 @@
             <span class="muted">Цена за каждые начатые 24 часа</span>
           </div>
           <div id="catalog" class="catalog"></div>
+        </section>
+        <section id="maintenance-view" class="view" hidden>
+          <div class="section-heading">
+            <h2>Обслуживание парка</h2>
+            <button id="maintenance-refresh" class="text-button">↻ Обновить</button>
+          </div>
+          <p class="muted">
+            Плановый период занимает календарь. Активные работы удерживают оборудование до явного
+            завершения, включая просрочку.
+          </p>
+          <form id="maintenance-form" class="maintenance-form" hidden>
+            <h3>Запланировать обслуживание</h3>
+            <div class="maintenance-fields">
+              <label>Оборудование<select name="product" required></select></label>
+              <label
+                >Количество<input
+                  name="quantity"
+                  type="number"
+                  min="1"
+                  max="1000000"
+                  value="1"
+                  required
+              /></label>
+              <label
+                >Начало · UTC<input name="start" type="datetime-local" step="0.000001" required
+              /></label>
+              <label
+                >Окончание · UTC<input name="end" type="datetime-local" step="0.000001" required
+              /></label>
+            </div>
+            <label
+              >Причина<textarea
+                name="reason"
+                maxlength="500"
+                required
+                rows="2"
+                placeholder="Например, проверка кабелей и очистка корпуса"
+              ></textarea>
+            </label>
+            <button class="button primary" type="submit">Запланировать</button>
+          </form>
+          <div id="maintenance-error" class="notice danger" role="alert" hidden></div>
+          <div class="toolbar">
+            <label
+              >Состояние<select id="maintenance-filter">
+                <option value="">Все</option>
+                <option value="planned">Запланировано</option>
+                <option value="active">В работе</option>
+                <option value="overdue">Просрочено</option>
+                <option value="completed">Завершено</option>
+                <option value="cancelled">Отменено</option>
+              </select></label
+            >
+          </div>
+          <div id="maintenance-list" class="maintenance-list"></div>
+          <div class="table-footer">
+            <span id="maintenance-note"></span>
+            <div>
+              <button id="maintenance-prev" class="text-button">← Назад</button
+              ><button id="maintenance-next" class="text-button">Далее →</button>
+            </div>
+          </div>
         </section>
         <section id="audit-view" class="view" hidden>
           <div class="section-heading">

@@ -14,6 +14,9 @@ const state = {
   listRequest: 0,
   alternativesRequest: 0,
   exactPeriod: null,
+  maintenanceOffset: 0,
+  maintenanceRequest: 0,
+  maintenanceAttempt: null,
 };
 const labels = {
   hold: "Резерв",
@@ -33,6 +36,10 @@ const actionLabels = {
   "booking.cancel": "Бронирование отменено",
   "booking.expire": "Резерв истёк",
   "booking.reschedule": "Бронирование перенесено",
+  "maintenance.create": "Обслуживание запланировано",
+  "maintenance.start": "Обслуживание начато",
+  "maintenance.complete": "Обслуживание завершено",
+  "maintenance.cancel": "Обслуживание отменено",
   "product.create": "Добавлено оборудование",
   "product.update": "Обновлено оборудование",
 };
@@ -140,6 +147,8 @@ async function login(key) {
     $("#login-dialog").close();
     $("#api-key").value = "";
     state.attempt = null;
+    state.maintenanceAttempt = null;
+    $("#maintenance-form").hidden = state.role !== "admin";
     await refresh();
   } catch (error) {
     state.key = "";
@@ -203,6 +212,16 @@ async function refresh() {
     $("#overdue-banner").textContent =
       `⚑ ${overdue.length} ${overdue.length === 1 ? "просроченный возврат" : "просроченных возврата"} в последних 200 записях. Плановая доступность может отличаться от физического остатка. Проверьте оборудование перед выдачей.`;
     renderCatalog();
+    const select = $("#maintenance-form").elements.product;
+    const selected = select.value;
+    select.replaceChildren(
+      ...products.map((product) => {
+        const option = el("option", "", `${product.sku} · ${product.name}`);
+        option.value = product.id;
+        return option;
+      }),
+    );
+    if (products.some((product) => String(product.id) === selected)) select.value = selected;
     await loadView();
   } catch (error) {
     showError("#global-error", error);
@@ -227,6 +246,12 @@ const titles = {
     "Каждая единица",
     "работает на событие.",
     "Единый каталог, остатки и ставки проката.",
+  ],
+  maintenance: [
+    "Обслуживание",
+    "Работы по плану.",
+    "Парк под контролем.",
+    "Проверка и обслуживание без скрытой потери доступности.",
   ],
   audit: [
     "Журнал действий",
@@ -262,6 +287,7 @@ async function loadView() {
   if (state.view === "bookings") await loadBookings();
   if (state.view === "availability") await loadAvailability();
   if (state.view === "audit") await loadAudit();
+  if (state.view === "maintenance") await loadMaintenance();
 }
 async function loadBookings() {
   // Медленный ответ старого поиска не должен подменять результат нового фильтра.
@@ -378,7 +404,7 @@ async function loadAvailability() {
       node.setAttribute("aria-label", node.title);
       node.addEventListener("click", () => {
         toast(
-          `${node.title}${segment.booking_ids.length ? ". Брони: " + segment.booking_ids.map((id) => state.bookings.find((booking) => booking.id === id)?.reference || id.slice(0, 8)).join(", ") : ""}`,
+          `${node.title}${segment.maintenance_ids?.length ? ". Обслуживание: " + segment.maintenance_ids.map((id) => id.slice(0, 8)).join(", ") : ""}${segment.booking_ids.length ? ". Брони: " + segment.booking_ids.map((id) => state.bookings.find((booking) => booking.id === id)?.reference || id.slice(0, 8)).join(", ") : ""}`,
         );
       });
       segments.append(node);
@@ -391,8 +417,8 @@ async function loadAvailability() {
       el("strong", "", `${row.available} свободно по плану`),
       el(
         "small",
-        row.overdue_quantity ? "warning-text" : "",
-        `На складе: ${row.physical_available}${row.overdue_quantity ? ` · просрочено: ${row.overdue_quantity}` : ""}`,
+        row.overdue_quantity || row.maintenance_overdue_quantity ? "warning-text" : "",
+        `На складе: ${row.physical_available} · в обслуживании: ${row.maintenance_active_quantity || 0}${row.overdue_quantity ? ` · возврат просрочен: ${row.overdue_quantity}` : ""}${row.maintenance_overdue_quantity ? ` · обслуживание просрочено: ${row.maintenance_overdue_quantity}` : ""}`,
       ),
     );
     card.append(name, chart, stock);
@@ -598,6 +624,15 @@ $("#composer").addEventListener("submit", (event) => {
           button.addEventListener("click", () => inspect(id));
           card.append(button);
         }
+        for (const id of conflict.maintenance_ids || []) {
+          const button = el("button", "text-button", `Обслуживание ${id.slice(0, 8)} ↗`);
+          button.type = "button";
+          button.addEventListener("click", () => {
+            $("#composer-dialog").close();
+            $("[data-view=maintenance]").click();
+          });
+          card.append(button);
+        }
         $("#composer-conflicts").append(card);
       }
     }
@@ -647,12 +682,12 @@ $("#find-alternatives").addEventListener("click", (event) =>
           "Один вариант на каждый свободный участок. Предложения не удерживают оборудование; при создании всё проверяется заново.",
         ),
       );
-      if (result.items.some((item) => item.overdue_quantity))
+      if (result.items.some((item) => item.overdue_quantity || item.maintenance_overdue_quantity))
         box.append(
           el(
             "p",
             "notice warning",
-            "Есть просроченные возвраты. Эти варианты подходят по плану; физическая возможность выдачи зависит от возврата оборудования.",
+            "Есть просроченные возвраты или обслуживание. Эти варианты подходят по плану; физическая выдача требует возврата и завершения работ.",
           ),
         );
       for (const option of result.alternatives) {
@@ -812,7 +847,7 @@ async function inspect(id) {
                   el(
                     "div",
                     "",
-                    `Позиция ${conflict.product_id}: выдано ${conflict.checked_out}, требуется ${conflict.requested}, парк ${conflict.capacity}.`,
+                    `Позиция ${conflict.product_id}: физически занято ${conflict.physically_occupied ?? conflict.checked_out}, требуется ${conflict.requested}, парк ${conflict.capacity}.`,
                   ),
                 );
             }
@@ -927,6 +962,148 @@ $("#expire").addEventListener("click", (event) =>
     }
   }),
 );
+
+const maintenanceLabels = {
+  planned: "Запланировано",
+  active: "В работе",
+  completed: "Завершено",
+  cancelled: "Отменено",
+};
+async function loadMaintenance() {
+  // Более ранняя загрузка не должна перезаписать новый фильтр или страницу.
+  const token = ++state.maintenanceRequest;
+  const params = new URLSearchParams({ limit: "50", offset: String(state.maintenanceOffset) });
+  if ($("#maintenance-filter").value) params.set("status", $("#maintenance-filter").value);
+  const rows = await api(`/maintenance?${params}`);
+  if (token !== state.maintenanceRequest) return;
+  const list = $("#maintenance-list");
+  list.replaceChildren();
+  $("#maintenance-prev").disabled = state.maintenanceOffset === 0;
+  $("#maintenance-next").disabled = rows.length < 50;
+  $("#maintenance-note").textContent = rows.length
+    ? `Записи ${state.maintenanceOffset + 1}–${state.maintenanceOffset + rows.length} · UTC`
+    : "Обслуживаний в этой выборке нет";
+  for (const item of rows) {
+    const card = el("article", "maintenance-card");
+    const missed = item.missed;
+    card.append(
+      el("h3", "", `${item.product_name} × ${item.quantity}`),
+      el(
+        "span",
+        `status ${item.overdue ? "overdue" : item.status}`,
+        item.overdue
+          ? "Обслуживание просрочено"
+          : missed
+            ? "Период пропущен"
+            : maintenanceLabels[item.status],
+      ),
+      el("p", "", item.reason),
+      el("p", "exact-time", `${item.start_at} → ${item.end_at}`),
+      el("p", "muted", `Создал: ${item.created_by_name} · ${item.id.slice(0, 8)}`),
+    );
+    if (item.started_at)
+      card.append(
+        el("p", "muted", `Фактически начато: ${item.started_at} · ${item.started_by_name}`),
+      );
+    if (item.completed_at)
+      card.append(el("p", "muted", `Завершено: ${item.completed_at} · ${item.completed_by_name}`));
+    if (item.status === "active")
+      card.append(
+        el(
+          "p",
+          item.overdue ? "notice warning" : "muted",
+          "Физический остаток занят до явного завершения.",
+        ),
+      );
+    if (state.role === "admin") {
+      const actions = el("div", "inspector-actions");
+      const options =
+        item.status === "planned"
+          ? [
+              ["start", "Начать"],
+              ["cancel", "Отменить"],
+            ]
+          : item.status === "active"
+            ? [["complete", "Завершить"]]
+            : [];
+      for (const [action, label] of options) {
+        const button = el("button", "button secondary", label);
+        if (
+          action === "start" &&
+          !(Date.now() >= Date.parse(item.start_at) && Date.now() < Date.parse(item.end_at))
+        ) {
+          button.disabled = true;
+          button.title =
+            "Начать можно только внутри планового периода; обновите список после его начала";
+        }
+        button.addEventListener("click", () =>
+          busy(button, async () => {
+            clearError("#maintenance-error");
+            try {
+              await api(`/maintenance/${item.id}/${action}`, { method: "POST" });
+              await refresh();
+              toast("Состояние обслуживания обновлено");
+            } catch (error) {
+              showError("#maintenance-error", error);
+            }
+          }),
+        );
+        actions.append(button);
+      }
+      card.append(actions);
+    }
+    list.append(card);
+  }
+}
+function reloadMaintenance() {
+  return loadMaintenance().catch((error) => showError("#maintenance-error", error));
+}
+$("#maintenance-filter").addEventListener("change", () => {
+  state.maintenanceOffset = 0;
+  reloadMaintenance();
+});
+$("#maintenance-refresh").addEventListener("click", reloadMaintenance);
+$("#maintenance-prev").addEventListener("click", () => {
+  state.maintenanceOffset = Math.max(0, state.maintenanceOffset - 50);
+  reloadMaintenance();
+});
+$("#maintenance-next").addEventListener("click", () => {
+  state.maintenanceOffset += 50;
+  reloadMaintenance();
+});
+const maintenanceForm = $("#maintenance-form");
+[maintenanceForm.elements.start.value, maintenanceForm.elements.end.value] = defaultPeriod();
+maintenanceForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  busy($("button[type=submit]", maintenanceForm), async () => {
+    clearError("#maintenance-error");
+    try {
+      const fields = maintenanceForm.elements;
+      // Строки datetime-local отправляем напрямую с Z, сохраняя дробные секунды.
+      const body = JSON.stringify({
+        product_id: Number(fields.product.value),
+        quantity: Number(fields.quantity.value),
+        start_at: fields.start.value + "Z",
+        end_at: fields.end.value + "Z",
+        reason: fields.reason.value,
+      });
+      if (!state.maintenanceAttempt || state.maintenanceAttempt.body !== body)
+        state.maintenanceAttempt = { body, key: crypto.randomUUID() };
+      await api("/maintenance", {
+        method: "POST",
+        body,
+        headers: { "Idempotency-Key": state.maintenanceAttempt.key },
+      });
+      state.maintenanceAttempt = null;
+      fields.reason.value = "";
+      await refresh();
+      toast("Обслуживание запланировано");
+    } catch (error) {
+      showError("#maintenance-error", error);
+    }
+  });
+});
+
 try {
   const config = await api("/config");
   $("#demo-badge").hidden = !config.demo;

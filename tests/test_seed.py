@@ -14,3 +14,11 @@ def test_seed_is_repeatable_and_exposes_meaningful_states(db):
     assert any(row["overdue"] for row in before)
     assert seed_demo(db, now) is False
     assert len(service.list_bookings()) == len(before)
+
+
+def test_maintenance_seed_includes_planned_and_overdue(db):
+    now = datetime(2030, 4, 2, 12, tzinfo=UTC)
+    seed_demo(db, now)
+    rows = RentalService(db, lambda: now).list_maintenance()
+    assert {row["status"] for row in rows} == {"planned", "active"}
+    assert any(row["overdue"] for row in rows)
