@@ -31,7 +31,7 @@ jobs:
           python-version: '3.12'
           cache: pip
       - name: Установить зависимости
-        run: python -m pip install -e '.[dev]'
+        run: python -m pip install -c constraints.txt -e '.[dev]'
       - name: Проверить стиль
         run: |
           python -m ruff check .

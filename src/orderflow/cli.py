@@ -5,6 +5,7 @@ import sys
 import uvicorn
 
 from .db import Database
+from .errors import DomainError
 from .seed import seed_demo
 
 
@@ -41,8 +42,8 @@ def main():
     parser = RussianParser(prog="orderflow", description="OrderFlow · управление пунктом проката")
     parser.add_argument(
         "command",
-        choices=["serve", "demo", "init"],
-        help="Запуск сервера, демо или создание таблиц",
+        choices=["serve", "demo", "init", "create-indexes"],
+        help="Запуск сервера, демо, создание таблиц или явное обновление индекса",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Адрес прослушивания")
     parser.add_argument("--port", type=int, default=8000, help="Порт сервера")
@@ -51,6 +52,22 @@ def main():
     default = "sqlite:///orderflow-demo.db" if args.command == "demo" else "sqlite:///orderflow.db"
     url = args.database or os.getenv("ORDERFLOW_DATABASE_URL", default)
     os.environ["ORDERFLOW_DATABASE_URL"] = url
+    if args.command == "create-indexes":
+        db = Database(url)
+        try:
+            db.create_indexes()
+        except DomainError as error:
+            message = (
+                "После освобождения блокировки повторите create-indexes"
+                if error.code == "storage_busy"
+                else str(error)
+            )
+            print(f"Не удалось создать индекс ({error.code}): {message}", file=sys.stderr)
+            raise SystemExit(1) from None
+        finally:
+            db.engine.dispose()
+        print("Индекс проверен и создан при необходимости")
+        return
     if args.command in {"init", "demo"}:
         db = Database(url)
         db.initialize()

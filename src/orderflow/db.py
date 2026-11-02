@@ -8,6 +8,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     MetaData,
     String,
@@ -65,6 +66,12 @@ items = Table(
     Column("rate_cents", BigInteger, nullable=False),
     CheckConstraint("quantity > 0"),
     CheckConstraint("rate_cents >= 0"),
+)
+booking_pool_index = Index(
+    "ix_booking_items_product_booking_quantity",
+    items.c.product_id,
+    items.c.booking_id,
+    items.c.quantity,
 )
 idempotency = Table(
     "idempotency",
@@ -142,6 +149,11 @@ class Database:
 
     def initialize(self):
         metadata.create_all(self.engine)
+
+    def create_indexes(self):
+        # Существующий парк обновляется только явной административной командой.
+        with self.transaction(write=True) as connection:
+            booking_pool_index.create(connection, checkfirst=True)
 
     @contextmanager
     def transaction(self, write=False):
