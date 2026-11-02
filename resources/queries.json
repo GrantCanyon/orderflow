@@ -1,0 +1,47 @@
+{
+  "calendar": {
+    "prepare": "PREPARE qp_calendar AS SELECT bookings.id, bookings.start_at, bookings.end_at, booking_items.quantity \nFROM bookings JOIN booking_items ON bookings.id = booking_items.booking_id \nWHERE booking_items.product_id = $1 AND (bookings.status IN ($6, $7) OR bookings.status = $2 AND bookings.expires_at > $3) AND bookings.start_at < $4 AND bookings.end_at > $5",
+    "execute": "EXECUTE qp_calendar(1, 'hold', '2030-01-01 08:00:00+00:00', '2030-01-05 08:00:00+00:00', '2030-01-02 08:00:00+00:00', 'confirmed', 'checked_out')",
+    "parameters": [
+      1,
+      "hold",
+      "2030-01-01 08:00:00+00:00",
+      "2030-01-05 08:00:00+00:00",
+      "2030-01-02 08:00:00+00:00",
+      "confirmed",
+      "checked_out"
+    ]
+  },
+  "physical_out": {
+    "prepare": "PREPARE qp_physical_out AS SELECT coalesce(sum(booking_items.quantity), $1) AS coalesce_1 \nFROM booking_items JOIN bookings ON booking_items.booking_id = bookings.id \nWHERE booking_items.product_id = $2 AND bookings.status = $3",
+    "execute": "EXECUTE qp_physical_out(0, 1, 'checked_out')",
+    "parameters": [
+      0,
+      1,
+      "checked_out"
+    ]
+  },
+  "alternatives": {
+    "prepare": "PREPARE qp_alternatives AS SELECT products.id, products.sku, products.name, products.category, products.capacity, products.daily_rate_cents, reservations.booking_id, reservations.start_at, reservations.end_at, reservations.status, reservations.quantity \nFROM products LEFT OUTER JOIN (SELECT booking_items.product_id AS product_id, bookings.id AS booking_id, bookings.start_at AS start_at, bookings.end_at AS end_at, bookings.status AS status, booking_items.quantity AS quantity \nFROM booking_items JOIN bookings ON booking_items.booking_id = bookings.id \nWHERE booking_items.product_id IN ($6, $7, $8, $9, $10) AND (bookings.status = $1 OR (bookings.status IN ($11, $12) OR bookings.status = $2 AND bookings.expires_at > $3) AND bookings.start_at < $4 AND bookings.end_at > $5)) AS reservations ON products.id = reservations.product_id \nWHERE products.id IN ($13, $14, $15, $16, $17)",
+    "execute": "EXECUTE qp_alternatives('checked_out', 'hold', '2030-01-01 08:00:00+00:00', '2030-01-22 08:00:00+00:00', '2030-01-02 08:00:00+00:00', 1, 2, 3, 4, 5, 'confirmed', 'checked_out', 1, 2, 3, 4, 5)",
+    "parameters": [
+      "checked_out",
+      "hold",
+      "2030-01-01 08:00:00+00:00",
+      "2030-01-22 08:00:00+00:00",
+      "2030-01-02 08:00:00+00:00",
+      1,
+      2,
+      3,
+      4,
+      5,
+      "confirmed",
+      "checked_out",
+      1,
+      2,
+      3,
+      4,
+      5
+    ]
+  }
+}

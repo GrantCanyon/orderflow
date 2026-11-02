@@ -48,6 +48,11 @@ jobs:
         env:
           ORDERFLOW_TEST_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/orderflow_test
         run: python -m pytest -q
+      - name: Проверить самостоятельный SQL-измеритель
+        if: matrix.database == 'postgresql'
+        env:
+          ORDERFLOW_QUERY_DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/orderflow_test
+        run: python scripts/query_plans.py --output artifacts/query-plan-smoke --rows 1000 --repeats 1 --comparison all
   compose-smoke:
     name: Запуск Docker Compose
     runs-on: ubuntu-latest
