@@ -10,6 +10,8 @@ from .db import audit_events, bookings, idempotency, items, products
 from .errors import DomainError
 from .identity import actor as identify
 
+MAX_DATABASE_ID = 2_147_483_647
+
 
 def utc(value):
     if isinstance(value, str):
@@ -44,6 +46,10 @@ def integer(value, minimum=0, maximum=1_000_000):
 def text(value, maximum):
     if not isinstance(value, str) or not 1 <= len(value.strip()) <= maximum:
         raise DomainError("invalid_input", "Текст пуст или слишком длинный", status=422)
+    if "\x00" in value or any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+        raise DomainError(
+            "invalid_input", "Текст содержит недопустимые символы Unicode", status=422
+        )
     return value.strip()
 
 
@@ -66,6 +72,7 @@ class RentalService:
         )
 
     def _lock_products(self, conn, ids):
+        ids = [integer(product_id, 1, MAX_DATABASE_ID) for product_id in ids]
         rows = (
             conn.execute(
                 select(products)
@@ -393,7 +400,7 @@ class RentalService:
                 raise DomainError("invalid_input", "Некорректная позиция", status=422)
             normalized.append(
                 {
-                    "product_id": integer(item.get("product_id"), 1),
+                    "product_id": integer(item.get("product_id"), 1, MAX_DATABASE_ID),
                     "quantity": integer(item.get("quantity"), 1),
                 }
             )
@@ -739,11 +746,13 @@ class RentalService:
 
     def audit(self, booking_id=None, limit=100, before_id=None):
         integer(limit, 1, 200)
+        if before_id is not None:
+            integer(before_id, 1, MAX_DATABASE_ID)
         with self.db.transaction() as conn:
             query = select(audit_events)
             if booking_id:
                 query = query.where(audit_events.c.booking_id == booking_id)
-            if before_id:
+            if before_id is not None:
                 query = query.where(audit_events.c.id < before_id)
             rows = conn.execute(query.order_by(audit_events.c.id.desc()).limit(limit)).mappings()
             return [{**row, "created_at": iso(row["created_at"])} for row in rows]

@@ -1,3 +1,4 @@
+import os
 from contextlib import contextmanager
 
 from sqlalchemy import (
@@ -14,7 +15,13 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    func,
+    select,
 )
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+
+from .errors import storage_error
 
 metadata = MetaData()
 products = Table(
@@ -83,13 +90,23 @@ audit_events = Table(
 
 
 class Database:
-    def __init__(self, url):
+    def __init__(self, url, lock_timeout_ms=None):
+        if lock_timeout_ms is None:
+            raw = os.getenv("ORDERFLOW_LOCK_TIMEOUT_MS", "2000")
+            if not raw.isascii() or not raw.isdecimal():
+                raise ValueError(
+                    "ORDERFLOW_LOCK_TIMEOUT_MS должен быть целым числом от 50 до 30000"
+                )
+            lock_timeout_ms = int(raw)
+        if type(lock_timeout_ms) is not int or not 50 <= lock_timeout_ms <= 30000:
+            raise ValueError("Ожидание блокировки должно быть от 50 до 30000 миллисекунд")
+        self.lock_timeout_ms = lock_timeout_ms
         options = (
-            {"connect_args": {"check_same_thread": False, "timeout": 30}}
-            if url.startswith("sqlite")
+            {"connect_args": {"check_same_thread": False, "timeout": lock_timeout_ms / 1000}}
+            if make_url(url).get_backend_name() == "sqlite"
             else {}
         )
-        self.engine = create_engine(url, pool_pre_ping=True, **options)
+        self.engine = create_engine(url, pool_pre_ping=True, hide_parameters=True, **options)
         self.sqlite = self.engine.dialect.name == "sqlite"
         if self.sqlite:
 
@@ -102,14 +119,30 @@ class Database:
 
     @contextmanager
     def transaction(self, write=False):
-        with self.engine.connect() as connection:
-            if write and self.sqlite:
-                connection.exec_driver_sql("BEGIN IMMEDIATE")
-            else:
-                connection.begin()
-            try:
-                yield connection
-                connection.commit()
-            except BaseException:
-                connection.rollback()
-                raise
+        try:
+            with self.engine.connect() as connection:
+                try:
+                    if write and self.sqlite:
+                        connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    else:
+                        connection.begin()
+                    if self.engine.dialect.name == "postgresql":
+                        connection.execute(
+                            select(
+                                func.set_config("lock_timeout", f"{self.lock_timeout_ms}ms", True)
+                            )
+                        )
+                    yield connection
+                    connection.commit()
+                except BaseException:
+                    try:
+                        connection.rollback()
+                    except SQLAlchemyError:
+                        # Потеря соединения при COMMIT не позволяет обещать откат.
+                        pass
+                    raise
+        except IntegrityError:
+            # Уникальные ограничения обрабатываются сервисом (артикул и ключ повтора).
+            raise
+        except SQLAlchemyError as error:
+            raise storage_error(error) from None

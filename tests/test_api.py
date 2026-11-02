@@ -221,3 +221,128 @@ def test_alternatives_api_does_not_coerce_boolean_limit(db, clock, product):
             api.post("/api/alternatives", headers=headers("viewer"), json=payload).status_code
             == 422
         )
+
+
+def test_nul_text_is_rejected_before_database_write(db, clock, product):
+    with client(db, clock) as api:
+        payload = request(product["id"])
+        payload["label"] = "Имя\x00события"
+        response = api.post(
+            "/api/bookings", headers={**headers("operator"), "Idempotency-Key": "nul"}, json=payload
+        )
+        assert response.status_code == 422
+        assert response.json()["error"]["code"] == "invalid_input"
+        for field in ["name", "category"]:
+            response = api.patch(
+                f"/api/products/{product['id']}",
+                headers=headers("admin"),
+                json={field: "Текст\x00поля"},
+            )
+            assert response.status_code == 422
+        assert api.get("/api/bookings", headers=headers("viewer")).json() == []
+
+
+def test_principal_name_requires_unicode_scalars_without_nul(db, clock):
+    import pytest
+
+    for name in ["Имя\x00", "Имя\ud800", "Имя\udfff"]:
+        with pytest.raises(ValueError):
+            create_app(
+                db=db,
+                clock=clock,
+                principals={"key": {"id": "operator", "name": name, "role": "operator"}},
+            )
+
+
+def test_normal_cyrillic_and_newline_text_remain_supported(db, clock, product):
+    with client(db, clock) as api:
+        payload = request(product["id"])
+        payload["label"] = "Событие\nВторая строка"
+        response = api.post(
+            "/api/bookings",
+            headers={**headers("operator"), "Idempotency-Key": "unicode"},
+            json=payload,
+        )
+        assert response.status_code == 201
+        assert response.json()["label"] == payload["label"]
+
+
+def test_integer_database_ids_are_bounded_before_sql(db, clock, product, service):
+    import pytest
+
+    from orderflow.errors import DomainError
+
+    for invalid in [2**31, 2**64, 0, -1, True]:
+        with client(db, clock) as api:
+            audit_response = api.get(
+                "/api/audit", params={"before_id": invalid}, headers=headers("viewer")
+            )
+            product_response = api.patch(
+                f"/api/products/{invalid}", json={"capacity": 1}, headers=headers("admin")
+            )
+            payload = request(invalid)
+            booking_response = api.post(
+                "/api/bookings",
+                json=payload,
+                headers={**headers("operator"), "Idempotency-Key": f"id-{invalid}"},
+            )
+            alternative_response = api.post(
+                "/api/alternatives",
+                headers=headers("viewer"),
+                json={
+                    "start_at": payload["start_at"],
+                    "end_at": payload["end_at"],
+                    "items": payload["items"],
+                    "search_until": "2030-01-03T10:00:00Z",
+                },
+            )
+            assert [
+                response.status_code
+                for response in [
+                    audit_response,
+                    product_response,
+                    booking_response,
+                    alternative_response,
+                ]
+            ] == [422] * 4
+        with pytest.raises(DomainError) as error:
+            service.audit(before_id=invalid)
+        assert error.value.status == 422
+        with pytest.raises(DomainError) as error:
+            service.update_product("admin", invalid, capacity=1)
+        assert error.value.status == 422
+    assert service.list_bookings() == []
+    assert service.list_products()[0]["capacity"] == 3
+
+
+def test_maximum_integer_id_is_a_valid_query_not_an_overflow(db, clock, service):
+    import pytest
+
+    from orderflow.errors import DomainError
+
+    maximum = 2**31 - 1
+    with client(db, clock) as api:
+        assert (
+            api.get(
+                "/api/audit", params={"before_id": maximum}, headers=headers("viewer")
+            ).status_code
+            == 200
+        )
+        assert (
+            api.patch(
+                f"/api/products/{maximum}", json={"capacity": 1}, headers=headers("admin")
+            ).status_code
+            == 404
+        )
+        assert (
+            api.post(
+                "/api/bookings",
+                json=request(maximum),
+                headers={**headers("operator"), "Idempotency-Key": "valid-id-boundary"},
+            ).status_code
+            == 404
+        )
+    assert service.audit(before_id=maximum) == []
+    with pytest.raises(DomainError) as error:
+        service.update_product("admin", maximum, capacity=1)
+    assert error.value.status == 404

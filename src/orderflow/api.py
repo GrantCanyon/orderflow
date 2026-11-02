@@ -7,16 +7,18 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, Query, Request
+from fastapi import Path as PathParameter
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 from sqlalchemy import text as sql_text
+from sqlalchemy.exc import SQLAlchemyError
 
 from .db import Database
-from .errors import DomainError
+from .errors import DomainError, storage_error
 from .identity import Actor
-from .service import RentalService
+from .service import MAX_DATABASE_ID, RentalService, text
 
 
 class Payload(BaseModel):
@@ -24,7 +26,7 @@ class Payload(BaseModel):
 
 
 class BookingItem(Payload):
-    product_id: Annotated[StrictInt, Field(gt=0)]
+    product_id: Annotated[StrictInt, Field(gt=0, le=MAX_DATABASE_ID)]
     quantity: Annotated[StrictInt, Field(gt=0, le=1_000_000)]
 
 
@@ -95,6 +97,10 @@ def create_app(db=None, clock=None, principals=None, demo=False):
             raise ValueError("Некорректная конфигурация ключей доступа")
         if not isinstance(principal.get("name"), str) or not 1 <= len(principal["name"]) <= 80:
             raise ValueError("Укажите имя пользователя длиной от 1 до 80 символов")
+        try:
+            text(principal["name"], 80)
+        except DomainError:
+            raise ValueError("Имя пользователя содержит недопустимый текст") from None
     service = RentalService(db, clock)
 
     @asynccontextmanager
@@ -116,10 +122,18 @@ def create_app(db=None, clock=None, principals=None, demo=False):
     async def domain_error(request: Request, error: DomainError):
         return JSONResponse(
             status_code=error.status,
+            headers={"Retry-After": str(error.retry_after)}
+            if error.retry_after is not None
+            else {},
             content={
                 "error": {"code": error.code, "message": str(error), "details": error.details}
             },
         )
+
+    @app.exception_handler(SQLAlchemyError)
+    async def database_error(request: Request, error: SQLAlchemyError):
+        # Обработанную ошибку не печатаем вместе с SQL, параметрами или секретами.
+        return await domain_error(request, storage_error(error))
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, error: RequestValidationError):
@@ -193,7 +207,11 @@ def create_app(db=None, clock=None, principals=None, demo=False):
         )
 
     @app.patch("/api/products/{product_id}")
-    def edit_product(product_id: int, body: ProductUpdate, principal=Depends(admin)):
+    def edit_product(
+        product_id: Annotated[int, PathParameter(ge=1, le=MAX_DATABASE_ID)],
+        body: ProductUpdate,
+        principal=Depends(admin),
+    ):
         return service.update_product(
             Actor(principal["id"], principal["name"]),
             product_id,
@@ -249,7 +267,7 @@ def create_app(db=None, clock=None, principals=None, demo=False):
     def audit(
         booking_id: str | None = None,
         limit: Annotated[int, Query(ge=1, le=200)] = 100,
-        before_id: Annotated[int | None, Query(ge=1)] = None,
+        before_id: Annotated[int | None, Query(ge=1, le=MAX_DATABASE_ID)] = None,
         principal=Depends(identity),
     ):
         return service.audit(booking_id, limit, before_id)
